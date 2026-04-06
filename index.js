@@ -2,6 +2,7 @@ const express = require("express")
 const app = express()
 
 const ALLOWED_ASSET_TYPES = [2, 11, 12, 34]
+const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY
 
 app.use((req, res, next) => {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`)
@@ -10,7 +11,6 @@ app.use((req, res, next) => {
 
 app.get("/", (req, res) => res.json({ status: "ok" }))
 
-// Fetch inventory (T-Shirt, Shirt, Pants)
 app.get("/inventory/:userId/:assetType/all", async (req, res) => {
     const userId    = parseInt(req.params.userId)
     const assetType = parseInt(req.params.assetType)
@@ -34,69 +34,43 @@ app.get("/inventory/:userId/:assetType/all", async (req, res) => {
     }
 })
 
-// Fetch passes của user qua catalog + economy API
-app.get("/passes/user/:userId", async (req, res) => {
-    const userId = parseInt(req.params.userId)
-    if (isNaN(userId)) return res.status(400).json({ error: "Invalid userId" })
-
+app.get("/passes/:universeId/user/:userId", async (req, res) => {
+    const universeId = parseInt(req.params.universeId)
+    const userId     = parseInt(req.params.userId)
+    if (isNaN(universeId) || isNaN(userId)) {
+        return res.status(400).json({ error: "Invalid params" })
+    }
+    if (!ROBLOX_API_KEY) {
+        return res.status(500).json({ error: "API key not configured" })
+    }
     try {
-        // Bước 1: Lấy danh sách pass ID từ catalog
-        const allIds = []
+        const all = []
         let cursor = ""
         do {
-            const url = `https://catalog.roblox.com/v1/search/items?category=GamePass&creatorTargetId=${userId}&creatorType=User&limit=30${cursor ? "&cursor=" + cursor : ""}`
-            const r = await fetch(url)
-            if (!r.ok) break
-            const data = await r.json()
-            if (data.data) {
-                for (const item of data.data) {
-                    if (item.id) allIds.push(item.id)
-                }
+            let url = `https://apis.roblox.com/cloud/v2/universes/${universeId}/game-passes?maxPageSize=100`
+            if (cursor) url += `&pageToken=${cursor}`
+            const r = await fetch(url, {
+                headers: { "x-api-key": ROBLOX_API_KEY }
+            })
+            if (!r.ok) {
+                const err = await r.text()
+                console.error("Open Cloud error:", r.status, err)
+                break
             }
-            cursor = data.nextPageCursor || ""
+            const data = await r.json()
+            if (data.gamePasses) all.push(...data.gamePasses)
+            cursor = data.nextPageToken || ""
         } while (cursor)
 
-        if (allIds.length === 0) {
-            return res.json({ data: [], total: 0 })
-        }
+        // Filter theo userId và price > 0
+        const owned = all.filter(p => {
+            const creatorId = p.creatorId || (p.creator && p.creator.userId)
+            return String(creatorId) === String(userId) &&
+                   p.price != null &&
+                   p.price > 0
+        })
 
-        // Bước 2: Batch fetch details (tên, giá, icon) từng 30 items
-        const allPasses = []
-        for (let i = 0; i < allIds.length; i += 30) {
-            const batch = allIds.slice(i, i + 30)
-            const ids = batch.map(id => `itemIds=${id}`).join("&")
-            const url = `https://economy.roblox.com/v2/assets/prices?assetType=GamePass&${ids}`
-            const r = await fetch(url)
-            if (!r.ok) continue
-            const priceData = await r.json()
-
-            // Fetch tên + icon riêng
-            const detailUrl = `https://catalog.roblox.com/v1/catalog/items/details`
-            const detailRes = await fetch(detailUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    items: batch.map(id => ({ itemType: "Asset", id }))
-                })
-            })
-            if (!detailRes.ok) continue
-            const detailData = await detailRes.json()
-
-            if (detailData.data) {
-                for (const item of detailData.data) {
-                    if (item.price && item.price > 0) {
-                        allPasses.push({
-                            id:           item.id,
-                            name:         item.name,
-                            price:        item.price,
-                            imageAssetId: item.thumbnail || null,
-                        })
-                    }
-                }
-            }
-        }
-
-        res.json({ data: allPasses, total: allPasses.length })
+        res.json({ data: owned, total: owned.length })
     } catch (e) {
         console.error(e)
         res.status(500).json({ error: e.message })
