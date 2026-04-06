@@ -8,20 +8,15 @@ app.use((req, res, next) => {
     next()
 })
 
-// Health check
-app.get("/", (req, res) => {
-    res.json({ status: "ok" })
-})
+app.get("/", (req, res) => res.json({ status: "ok" }))
 
 // Fetch inventory (T-Shirt, Shirt, Pants)
 app.get("/inventory/:userId/:assetType/all", async (req, res) => {
     const userId    = parseInt(req.params.userId)
     const assetType = parseInt(req.params.assetType)
-
     if (isNaN(userId) || !ALLOWED_ASSET_TYPES.includes(assetType)) {
         return res.status(400).json({ error: "Invalid params" })
     }
-
     try {
         const all = []
         let cursor = ""
@@ -33,44 +28,51 @@ app.get("/inventory/:userId/:assetType/all", async (req, res) => {
             if (data.data) all.push(...data.data)
             cursor = data.nextPageCursor || ""
         } while (cursor)
-
         res.json({ data: all, total: all.length })
     } catch (e) {
-        console.error(e)
         res.status(500).json({ error: e.message })
     }
 })
 
-// Fetch passes của 1 experience, filter theo userId
-app.get("/passes/:universeId/user/:userId", async (req, res) => {
-    const universeId = parseInt(req.params.universeId)
-    const userId     = parseInt(req.params.userId)
-
-    if (isNaN(universeId) || isNaN(userId)) {
-        return res.status(400).json({ error: "Invalid params" })
-    }
+// Fetch tất cả passes do userId tạo ra (tìm qua tất cả games của user)
+app.get("/passes/user/:userId", async (req, res) => {
+    const userId = parseInt(req.params.userId)
+    if (isNaN(userId)) return res.status(400).json({ error: "Invalid userId" })
 
     try {
-        const all = []
-        let cursor = ""
-        do {
-            const url = `https://games.roblox.com/v1/games/${universeId}/game-passes?sortOrder=Asc&limit=100&cursor=${cursor}`
-            const r = await fetch(url)
-            if (!r.ok) break
-            const data = await r.json()
-            if (data.data) all.push(...data.data)
-            cursor = data.nextPageCursor || ""
-        } while (cursor)
+        // Bước 1: Lấy danh sách games của user
+        const gamesUrl = `https://games.roblox.com/v2/users/${userId}/games?limit=50&sortOrder=Asc`
+        const gamesRes = await fetch(gamesUrl)
+        if (!gamesRes.ok) return res.json({ data: [], total: 0 })
 
-        // Chỉ giữ passes do đúng userId tạo, đang for sale, giá > 0
-        const owned = all.filter(p =>
-            p.seller &&
-            p.seller.id === userId &&
-            p.price != null &&
-            p.price > 0
-        )
+        const gamesData = await gamesRes.json()
+        const games = gamesData.data || []
 
-        res.json({ data: owned, total: owned.length })
+        // Bước 2: Với mỗi game, fetch passes
+        const allPasses = []
+        for (const game of games) {
+            const universeId = game.id
+            let cursor = ""
+            do {
+                const url = `https://games.roblox.com/v1/games/${universeId}/game-passes?sortOrder=Asc&limit=100&cursor=${cursor}`
+                const r = await fetch(url)
+                if (!r.ok) break
+                const data = await r.json()
+                if (data.data) {
+                    // Chỉ lấy passes do đúng userId tạo, giá > 0
+                    const valid = data.data.filter(p =>
+                        p.seller &&
+                        p.seller.id === userId &&
+                        p.price != null &&
+                        p.price > 0
+                    )
+                    allPasses.push(...valid)
+                }
+                cursor = data.nextPageCursor || ""
+            } while (cursor)
+        }
+
+        res.json({ data: allPasses, total: allPasses.length })
     } catch (e) {
         console.error(e)
         res.status(500).json({ error: e.message })
