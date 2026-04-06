@@ -47,30 +47,32 @@ app.get("/passes/:universeId/user/:userId", async (req, res) => {
         const all = []
         let cursor = ""
         do {
-            let url = `https://apis.roblox.com/cloud/v2/universes/${universeId}/game-passes?maxPageSize=100`
-            if (cursor) url += `&pageToken=${cursor}`
+            // Thử đúng endpoint Open Cloud
+            const url = `https://apis.roblox.com/cloud/v2/universes/${universeId}/game-passes?maxPageSize=100${cursor ? "&pageToken=" + cursor : ""}`
             const r = await fetch(url, {
                 headers: { "x-api-key": ROBLOX_API_KEY }
             })
-            if (!r.ok) {
-                const err = await r.text()
-                console.error("Open Cloud error:", r.status, err)
-                break
-            }
-            const data = await r.json()
-            if (data.gamePasses) all.push(...data.gamePasses)
-            cursor = data.nextPageToken || ""
+
+            const rawText = await r.text()
+            console.log("Status:", r.status)
+            console.log("Response:", rawText)
+
+            if (!r.ok) break
+
+            const data = JSON.parse(rawText)
+            const items = data.gamePasses || data.gamePassess || data.data || []
+            all.push(...items)
+            cursor = data.nextPageToken || data.nextPageCursor || ""
         } while (cursor)
 
-        // Filter theo userId và price > 0
+        // Filter theo userId
         const owned = all.filter(p => {
-            const creatorId = p.creatorId || (p.creator && p.creator.userId)
-            return String(creatorId) === String(userId) &&
-                   p.price != null &&
-                   p.price > 0
+            const creatorId = p.creatorId || (p.creator && p.creator.id)
+            const price = p.price || p.priceInRobux
+            return creatorId === userId && price && price > 0
         })
 
-        res.json({ data: owned, total: owned.length })
+        res.json({ data: owned, total: owned.length, raw_total: all.length })
     } catch (e) {
         console.error(e)
         res.status(500).json({ error: e.message })
