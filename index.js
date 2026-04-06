@@ -34,42 +34,66 @@ app.get("/inventory/:userId/:assetType/all", async (req, res) => {
     }
 })
 
-// Fetch tất cả passes do userId tạo ra (tìm qua tất cả games của user)
+// Fetch passes của user qua catalog + economy API
 app.get("/passes/user/:userId", async (req, res) => {
     const userId = parseInt(req.params.userId)
     if (isNaN(userId)) return res.status(400).json({ error: "Invalid userId" })
 
     try {
-        // Bước 1: Lấy danh sách games của user
-        const gamesUrl = `https://games.roblox.com/v2/users/${userId}/games?limit=50&sortOrder=Asc`
-        const gamesRes = await fetch(gamesUrl)
-        if (!gamesRes.ok) return res.json({ data: [], total: 0 })
-
-        const gamesData = await gamesRes.json()
-        const games = gamesData.data || []
-
-        // Bước 2: Với mỗi game, fetch passes
-        const allPasses = []
-        for (const game of games) {
-            const universeId = game.id
-            let cursor = ""
-            do {
-                const url = `https://games.roblox.com/v1/games/${universeId}/game-passes?sortOrder=Asc&limit=100&cursor=${cursor}`
-                const r = await fetch(url)
-                if (!r.ok) break
-                const data = await r.json()
-                if (data.data) {
-                    // Chỉ lấy passes do đúng userId tạo, giá > 0
-                    const valid = data.data.filter(p =>
-                        p.seller &&
-                        p.seller.id === userId &&
-                        p.price != null &&
-                        p.price > 0
-                    )
-                    allPasses.push(...valid)
+        // Bước 1: Lấy danh sách pass ID từ catalog
+        const allIds = []
+        let cursor = ""
+        do {
+            const url = `https://catalog.roblox.com/v1/search/items?category=GamePass&creatorTargetId=${userId}&creatorType=User&limit=30${cursor ? "&cursor=" + cursor : ""}`
+            const r = await fetch(url)
+            if (!r.ok) break
+            const data = await r.json()
+            if (data.data) {
+                for (const item of data.data) {
+                    if (item.id) allIds.push(item.id)
                 }
-                cursor = data.nextPageCursor || ""
-            } while (cursor)
+            }
+            cursor = data.nextPageCursor || ""
+        } while (cursor)
+
+        if (allIds.length === 0) {
+            return res.json({ data: [], total: 0 })
+        }
+
+        // Bước 2: Batch fetch details (tên, giá, icon) từng 30 items
+        const allPasses = []
+        for (let i = 0; i < allIds.length; i += 30) {
+            const batch = allIds.slice(i, i + 30)
+            const ids = batch.map(id => `itemIds=${id}`).join("&")
+            const url = `https://economy.roblox.com/v2/assets/prices?assetType=GamePass&${ids}`
+            const r = await fetch(url)
+            if (!r.ok) continue
+            const priceData = await r.json()
+
+            // Fetch tên + icon riêng
+            const detailUrl = `https://catalog.roblox.com/v1/catalog/items/details`
+            const detailRes = await fetch(detailUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    items: batch.map(id => ({ itemType: "Asset", id }))
+                })
+            })
+            if (!detailRes.ok) continue
+            const detailData = await detailRes.json()
+
+            if (detailData.data) {
+                for (const item of detailData.data) {
+                    if (item.price && item.price > 0) {
+                        allPasses.push({
+                            id:           item.id,
+                            name:         item.name,
+                            price:        item.price,
+                            imageAssetId: item.thumbnail || null,
+                        })
+                    }
+                }
+            }
         }
 
         res.json({ data: allPasses, total: allPasses.length })
